@@ -1,61 +1,98 @@
-# Power Scheduler V1 웹 데모
+# Power Scheduler
 
-React + TypeScript의 한 페이지 데모다. 브라우저는 Spring Boot API를 호출하고, Spring Boot는 Python HTTP 어댑터를 통해 [power-scheduler-model](../power-scheduler-model/README.md)의 공개 optimize_known_prices 함수를 호출한다. 모델/최적화 계산을 프론트에서 재구현하지 않는다.
+<p align="center">
+  <strong>작업 제약을 지키면서 전력 사용 시점을 결정하는 웹 기반 일정 의사결정 MVP</strong><br />
+  React · TypeScript · Spring Boot · Python · MILP
+</p>
 
-## 첫 로컬 실행
+> **공모전 결과물 안내**<br />
+> Power Scheduler는 전기를 단순히 “덜 쓰게” 하는 서비스가 아니라, 마감·연속 가동·사업장 전력 한도를 지키면서 **언제 전력을 사용할지** 결정하도록 돕는 도구입니다. 사용자가 작업 조건을 입력하면, 알려진 시간대별 도매가격 아래에서 실행 가능한 저비용 일정을 계산해 화면에 제안합니다.
 
-세 저장소를 같은 상위 폴더에 둔다. 먼저 [backend README](../power-scheduler-backend/README.md#첫-로컬-실행)의 Python 3.12 설치와 모델 package 설치를 마치고, 별도 터미널에서 Python 어댑터(기본 127.0.0.1:8765)와 Spring Boot(기본 127.0.0.1:8080)를 실행한다.
+| 현재 공개 범위 | 핵심 방식 | 다음 단계 |
+| --- | --- | --- |
+| 웹 MVP와 실제 로컬 실행 결과 | V1: 알려진 가격 기반 제약 최적화 | V2: 미래 가격 예측 AI 결합 |
 
-~~~sh
-cd power-scheduler-frontend
-npm ci
-npm run dev -- --port 5174 --strictPort
-~~~
+## 결과 미리보기
 
-http://127.0.0.1:5174/ 를 연다. 이 작업에서 5173 포트를 다른 프로세스가 사용 중이어서 5174로 검증했다. 포트를 바꾸면 backend/scripts/smoke_http.py의 SCHEDULE_URL도 바꾼다. Vite는 /api 요청을 Spring Boot로 프록시한다. 다른 Spring 주소를 쓸 때는 프론트 터미널에서 SPRING_API_URL 환경변수를 설정한다. 이 주소는 개발 서버 전용이고 브라우저에 비밀정보를 넣지 않는다.
+아래는 로컬에서 프런트엔드 → Spring API → Python 어댑터 → 최적화 모델까지 연결해 실행한 **가상 사업장 A**의 실제 화면입니다. 입력 조건과 추천 결과, 24시간 가격·사용량 그래프, 작업 시간표를 한 번에 확인할 수 있습니다.
 
-~~~sh
-SPRING_API_URL=http://127.0.0.1:8080 npm run dev -- --port 5174 --strictPort
-npm run typecheck
-npm run build
-~~~
+<p align="center">
+  <img src="./docs/images/01-demo-a-optimal.jpg" alt="가상 사업장 A의 최적 일정 결과 화면. 입력 조건, 비용 비교, 시간별 가격과 추천 전력 사용량, 작업 시간표가 표시된다." width="880" />
+</p>
 
-검증 환경은 Node v25.2.1, npm 11.6.2, React 19.3.0, Vite 8.3.2, TypeScript 7.0.2였다. 모델 checkout은 08d9db5b40e0caa0e869659986c544959046ebc9, package 0.3.0rc2다. Node·Vite 요구사항의 변경 가능성은 [Vite 공식 안내](https://vite.dev/guide/)를 확인한다.
+| 시연 조건 | 실행 결과 |
+| --- | --- |
+| 가상 사업장 A · 전력 상한 1 MW · 연속 작업 3개 | <code>optimal</code> |
+| 공개 가격 fixture · 2025-01-15 UTC · 1시간 간격 | 추천 일정 비용 **€2,198.80** |
+| 동일 입력의 공개 <code>earliest</code> 기준 일정 | **€2,732.57** |
+| 두 일정의 비용 차이 | 추천 일정이 **€533.77 낮음** |
 
-## 화면 사용 방법
+> **중요한 해석**<br />
+> 위 금액은 공개 도매가격과 가상 작업 조건으로 계산한 **Wholesale Cost Proxy**입니다. 실제 기업의 전기요금, 실제 절감액, 매출 성과를 뜻하지 않습니다.
 
-1. 가상 사업장 A 또는 B를 선택한다. A는 모델 공식 synthetic 3작업 예제와 1 MW 상한이고, B는 같은 작업에 2 MW 상한을 적용한다. 이름·상한·작업을 직접 수정할 수 있다.
-2. 가격 날짜는 현재 committed SMARD 2025-01-15 UTC 한 날만 제공한다. 다른 날짜는 가격 누락 오류를 보여준다. 가격 파일은 모델 저장소에서 읽으며 자동으로 가상 가격으로 대체하지 않는다.
-3. 작업 ID, 시작 가능 UTC 슬롯, 완료 마감 UTC 슬롯, 연속 가동시간, 고정 MW를 입력한다. slot 0은 가격의 첫 UTC timestamp(이 fixture에서는 00:00 UTC)이고 종료 시각은 exclusive다. 24는 다음 날 00:00 UTC를 뜻한다.
-4. 일정 계산을 누르면 상태, 작업 시간표, 시간별 도매가격(€/MWh)과 전력 사용량(MW), Wholesale Cost Proxy(EUR), 모델의 동일 조건 earliest 기준이 가능한 경우의 비용 차이를 보여준다.
+## 어떤 문제를 푸는가
 
-입력 수정 즉시 이전 결과를 숨기고 진행 중 요청을 취소한다. 늦게 도착한 이전 응답이 새 결과를 덮지 않는다. optimal과 feasible, 입력 오류, 가격 누락, infeasible, 연결 오류를 구분한다. infeasible의 null 비용을 0으로 표시하지 않고, 일정이 없으면 사용량 차트를 0 MW라고 그리지 않는다.
+전력 사용량이 큰 작업은 ‘어느 시간에 실행할지’에 따라 비용이 달라질 수 있습니다. 그러나 실제 일정은 가격만 낮은 시간대로 옮길 수 없습니다. 각 작업의 시작 가능 시각·완료 마감·연속 가동시간, 그리고 같은 사업장이 동시에 쓸 수 있는 전력 한도를 함께 지켜야 하기 때문입니다.
 
-모든 회사 작업은 가상이며 비용은 실제 기업 청구요금이 아닌 도매비용 대리값이다. 기준 일정은 모델의 공개 earliest 방식으로 같은 company와 prices를 다시 호출한 결과다. 기준이 실행 가능한 일정을 반환하지 않으면 비교를 숨긴다. Oracle Regret, 실제 절감률, V2/V3 성과는 표시하지 않는다.
+Power Scheduler는 다음의 충돌을 한 화면에서 다룹니다.
 
-## API 계약
+- **운영 조건**: 작업 ID, 시작 가능 슬롯, 완료 마감, 연속 가동시간, 고정 MW를 입력합니다.
+- **사업장 제약**: 모든 작업의 동시 전력 사용량이 사업장 상한을 넘지 않도록 합니다.
+- **비용 판단**: 알려진 시간대별 가격을 기준으로 실행 가능한 일정 가운데 낮은 proxy 비용의 일정을 찾습니다.
 
-브라우저는 POST /api/v1/schedules/known-price에 company와 price_date를 보낸다. 첫 실행에서는 price_date=2025-01-15이며 company는 site_limit_mw, timezone, interval_hours=1, jobs 배열을 포함한다. 응답은 decision(모델 DecisionResult 전체), prices(실제 사용한 가격), baseline(같은 입력의 공개 earliest 결과 또는 null)이다. 모델 V1 결과 자체에는 입력 가격 배열이 없기 때문에 prices를 별도 받는다.
+## 현재 동작 방식
 
-HTTP 매핑과 예제 JSON은 [backend README](../power-scheduler-backend/README.md#실제-요청응답-계약)를 따른다. 가격 timestamp는 UTC이고 회사 timezone은 모델 입력 정보다. Frontend는 일정 slot을 첫 timestamp와 interval_hours로 UTC 시각으로 표시한다. 모델의 시간·단위 검증을 브라우저 검사로 대체하지 않는다.
+1. 사용자가 가상 사업장과 작업 조건을 선택하거나 직접 수정합니다.
+2. 브라우저가 <code>POST /api/v1/schedules/known-price</code>로 회사 조건과 가격 날짜를 전송합니다.
+3. Spring Boot API와 Python 어댑터를 거쳐 모델의 공개 <code>optimize_known_prices</code> 함수를 호출합니다.
+4. 화면은 계산 상태, 추천 일정, 작업별 시간표, 가격·전력 사용량 그래프, <code>earliest</code> 기준 비교를 표시합니다.
 
-## 확인한 결과
+<p align="center">
+  <img src="./docs/images/02-system-flow.png" alt="웹 화면에서 Spring API, Python Adapter, 최적화 모델로 이어지는 Power Scheduler 연동 구조" width="900" />
+</p>
 
-~~~sh
-npm run build
-~~~
+프런트엔드는 최적화 수식을 다시 구현하지 않습니다. 입력·표현·오류 안내를 담당하고, 일정 계산의 단일 기준은 별도 모델 패키지에 둡니다.
 
-타입 검사와 Vite 프로덕션 빌드가 통과했다. 브라우저에서 다음을 직접 확인했다.
+## 시연 시나리오와 확인 결과
 
-- A: optimal, 2,198.80 EUR. earliest 기준 2,732.57 EUR, 동일 조건의 proxy 비용차 533.77 EUR. 3작업 시간표와 24시간 차트 표시.
-- B: optimal, 1,506.64 EUR. earliest 기준 2,046.10 EUR. 2 MW 한도 표시.
-- 중복 작업 ID: INVALID_INPUT 화면. 제공되지 않은 날짜: MISSING_PRICE_DATA 화면.
-- 2 MW 작업을 1 MW 한도에 입력: infeasible, 비용 없음, 추천 사용량 없음.
-- Python 어댑터 중지: Spring을 통한 MODEL_UNAVAILABLE 연결 오류 화면.
-- 사업장 이름 또는 가격 날짜를 수정하면 이전 결과가 즉시 사라짐.
+| 시나리오 | 사업장 상한 | 상태 | 확인한 결과 |
+| --- | ---: | --- | --- |
+| A: 기본 제약 | 1 MW | <code>optimal</code> | €2,198.80 proxy · earliest €2,732.57 · 차이 €533.77 |
+| B: 상한 확대 | 2 MW | <code>optimal</code> | €1,506.64 proxy · earliest €2,046.10 |
+| 중복 작업 ID | — | <code>INVALID_INPUT</code> | 입력 오류를 별도 안내 |
+| 제공되지 않은 가격 날짜 | — | <code>MISSING_PRICE_DATA</code> | 가격 누락을 별도 안내 |
+| 1 MW 사업장에 2 MW 작업 | 1 MW | <code>infeasible</code> | 비용을 0으로 표시하지 않고 추천 사용량도 그리지 않음 |
+| 모델 어댑터 연결 중단 | — | <code>MODEL_UNAVAILABLE</code> | 모델 연결 오류를 별도 안내 |
 
-실제 웹 프록시부터 모델까지의 HTTP 검증 명령은 backend 폴더의 python3 scripts/smoke_http.py다. 모델 공식 V1 예제 및 Python/Spring 테스트 명령은 backend README에 있다.
+<code>earliest</code> 기준은 같은 회사 조건과 같은 가격을 모델의 공개 earliest 방식으로 다시 계산한 비교 기준입니다. 기준 일정이 실행 가능할 때만 차이를 표시합니다.
 
-## 범위
+## 결과를 읽는 법
 
-가격 날짜는 현재 한 날뿐이며, 사업장 작업은 가상이다. 15분 간격 입력, 실제 기업 요금, 실시간 가격, 인증, 저장, V2/V3, 배포는 이 데모에서 구현하거나 검증하지 않았다.
+<p align="center">
+  <img src="./docs/images/03-price-and-usage.png" alt="가상 사업장 A에서 시간별 도매가격과 추천 전력 사용량을 함께 나타낸 그래프" width="900" />
+</p>
+
+- 주황색 선은 2025-01-15 UTC의 시간별 도매가격입니다.
+- 초록색 막대는 모델이 추천한 전력 사용량입니다. A 시나리오에서는 작업 A를 00:00–04:00 UTC, B를 04:00–10:00 UTC, C를 21:00–24:00 UTC에 배치했습니다.
+- 그래프는 ‘가격이 낮은 시간대’만 보여 주는 것이 아니라, 각 작업의 마감·연속성·전력 상한을 모두 만족한 결과를 설명합니다.
+
+## V1의 역할과 AI 확장 계획
+
+현재 V1은 미래 가격을 예측하는 AI가 아닙니다. 이미 주어진 가격과 작업 제약 안에서 실행 가능한 일정을 찾는 **의사결정·최적화 엔진**입니다. 따라서 이 저장소의 결과를 ‘실시간 AI 예측’이나 ‘실제 절감 성과’로 표현하지 않습니다.
+
+향후 V2에서는 가격 예측 AI가 미래 시간대별 가격을 제시하고, 검증된 일정 엔진이 그 예측값을 입력으로 받아 계획을 계산하는 구조를 목표로 합니다. 예측 정확도는 과거 구간 검증으로, 비용 효과는 실제 계약요금·운영 제약을 포함한 현장 검증으로 각각 확인해야 합니다.
+
+## 구현 범위와 한계
+
+| 이번 V1에서 구현·확인한 것 | 아직 구현·검증하지 않은 것 |
+| --- | --- |
+| A/B 시나리오, 작업 조건 직접 수정, 상태별 결과 화면 | 실제 기업 전기요금과 실제 절감 성과 |
+| 가격·전력 사용량 그래프, 작업 시간표, earliest 비교 | 실시간 가격, 다일 가격, 15분 단위 입력 |
+| 입력 오류·가격 누락·실행 불가능·연결 오류의 구분 | 인증, 저장, 권한, 배포 |
+| 입력 변경 시 기존 결과 숨김 및 진행 요청 취소 | V2 가격 예측 AI와 V3 이후 재계산 |
+
+현재 가격 데이터는 모델 checkout에 포함된 **SMARD committed 2025-01-15 UTC** 하루의 24개 시간 슬롯이며, 사업장과 작업은 모두 가상입니다.
+
+---
+
+이 README의 화면과 수치는 로컬 연동 환경에서 확인한 V1 데모 결과입니다. 공개 저장소에서는 결과·동작 범위·한계를 먼저 확인할 수 있도록 구성했습니다.
