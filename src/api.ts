@@ -1,6 +1,5 @@
 import type { ModelError, ScheduleRequest, ScheduleResponse } from './types'
 
-const endpoint = '/api/v1/schedules/known-price'
 
 export class ApiError extends Error {
   constructor(
@@ -27,10 +26,11 @@ export async function calculateSchedule(
 ): Promise<ScheduleResponse> {
   let response: Response
   try {
-    response = await fetch(endpoint, {
+    const { mode, ...body } = request
+    response = await fetch('/api/v1/schedules/' + mode, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(request),
+      body: JSON.stringify(body),
       signal,
     })
   } catch (error) {

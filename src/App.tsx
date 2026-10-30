@@ -3,6 +3,8 @@ import { ApiError, calculateSchedule } from './api'
 import { copyExample } from './presets'
 import type {
   CompanyInput,
+  PlanningMode,
+  DecisionResult,
   DraftCompany,
   DraftJob,
   PriceSeries,
@@ -42,6 +44,8 @@ function statusText(status: string): string {
 }
 
 function errorTitle(code: string): string {
+  if (code === 'MODEL_ARTIFACT_ERROR') return '예측 모델을 불러올 수 없습니다'
+  if (code === 'FORECAST_ERROR' || code === 'SCENARIO_ERROR') return '가격 예측을 완료하지 못했습니다'
   if (code === 'INVALID_INPUT') return '입력 조건을 확인하세요'
   if (code === 'MISSING_PRICE_DATA') return '가격 데이터가 없습니다'
   if (code === 'MODEL_UNAVAILABLE' || code === 'SERVER_CONNECTION') return '서버에 연결할 수 없습니다'
@@ -53,10 +57,12 @@ function PowerChart({
   prices,
   load,
   siteLimit,
+  quantiles,
 }: {
   prices: PriceSeries
   load: number[]
   siteLimit: number
+  quantiles: DecisionResult['quantiles']
 }) {
   const [active, setActive] = useState<number | null>(null)
   const series = prices.prices_eur_mwh
@@ -70,8 +76,12 @@ function PowerChart({
   const bottom = 202
   const width = right - left
   const step = width / count
-  const lowest = Math.min(...series)
-  const highest = Math.max(...series)
+  const quantileIndices = [0.1, 0.5, 0.9].map((level) => quantiles?.levels.indexOf(level) ?? -1)
+  const bands = quantiles && quantileIndices.every((index) => index >= 0)
+    ? quantiles.predictions.map((row) => quantileIndices.map((index) => row[index])) : null
+  const scaleValues = bands ? [...series, ...bands.flat()] : series
+  const lowest = Math.min(...scaleValues)
+  const highest = Math.max(...scaleValues)
   const priceRange = Math.max(highest - lowest, 1)
   const peak = Math.max(siteLimit, ...load, 0.1)
   const priceY = (value: number) => top + (highest - value) / priceRange * (bottom - top)
@@ -116,6 +126,13 @@ function PowerChart({
               />
             )
           })}
+          {bands && <>
+            <polygon points={[
+              ...bands.map((row, i) => `${left + (i + .5) * step},${priceY(row[0])}`),
+              ...bands.map((row, i) => `${left + (i + .5) * step},${priceY(row[2])}`).reverse(),
+            ].join(' ')} className="chart-band" />
+            <polyline points={bands.map((row, i) => `${left + (i + .5) * step},${priceY(row[1])}`).join(' ')} className="chart-median" />
+          </>}
           <path d={line} className="chart-line" />
           {pricePoints.map((point, index) => index % 3 === 0 || index === selected ? (
             <circle
@@ -158,7 +175,8 @@ function PowerChart({
       </div>
       <div className="chart-caption">
         <div className="chart-legend">
-          <span><i className="legend-line" />시간별 도매가격</span>
+          <span><i className="legend-line" />{prices.price_mode === 'historical_known' ? '알려진 도매가격' : bands ? '시나리오 평균가격' : '예측가격'}</span>
+          {bands && <span><i className="legend-band" />P10–P90 · 점선 P50</span>}
           {hasSchedule && <span><i className="legend-bar" />추천 전력 사용량</span>}
         </div>
         <div className="chart-inspector">
@@ -207,7 +225,11 @@ function parseDraft(draft: DraftCompany, preset: 'A' | 'B' | 'custom'): CompanyI
 function App() {
   const [draft, setDraft] = useState<DraftCompany>(() => copyExample('A'))
   const [preset, setPreset] = useState<'A' | 'B' | 'custom'>('A')
+  const [mode, setMode] = useState<PlanningMode>('known-price')
   const [priceDate, setPriceDate] = useState('2025-01-15')
+  const [targetDate, setTargetDate] = useState('2025-10-07')
+  const [alpha, setAlpha] = useState('0.9')
+  const [riskLambda, setRiskLambda] = useState('0.5')
   const [response, setResponse] = useState<ScheduleResponse | null>(null)
   const [submitted, setSubmitted] = useState<CompanyInput | null>(null)
   const [error, setError] = useState<ApiError | null>(null)
@@ -283,7 +305,17 @@ function App() {
     setLoading(true)
     try {
       const company = parseDraft(draft, preset)
-      const next = await calculateSchedule({ company, price_date: priceDate }, controller.signal)
+      if (mode === 'risk-aware' && (!alpha.trim() || !riskLambda.trim() ||
+          !Number.isFinite(Number(alpha)) || Number(alpha) <= 0 || Number(alpha) >= 1 ||
+          !Number.isFinite(Number(riskLambda)) || Number(riskLambda) < 0)) {
+        throw new ApiError('INVALID_INPUT', 'α는 0과 1 사이, λ는 0 이상의 숫자여야 합니다.')
+      }
+      const request = mode === 'known-price'
+        ? { mode, company, price_date: priceDate }
+        : mode === 'forecast'
+          ? { mode, company, target_date: targetDate }
+          : { mode, company, target_date: targetDate, alpha: Number(alpha), risk_lambda: Number(riskLambda) }
+      const next = await calculateSchedule(request, controller.signal)
       if (requestId.current === id) {
         setSubmitted(company)
         setResponse(next)
@@ -302,6 +334,12 @@ function App() {
   }
 
   const decision = response?.decision
+  const modeName = mode === 'known-price' ? 'V1' : mode === 'forecast' ? 'V2' : 'V3'
+  const chartPrices: PriceSeries | null = response?.prices ?? (decision?.forecast_prices ? {
+    timestamps: decision.target_timestamps, prices_eur_mwh: decision.forecast_prices,
+    interval_hours: decision.interval_hours, timezone: 'UTC',
+    source: decision.forecast_model ?? '예측 모델', region: 'DE-LU', price_mode: decision.mode,
+  } : null)
   const baseline = response?.baseline
   const canCompare = decision?.wholesale_cost_proxy != null &&
     baseline?.wholesale_cost_proxy != null
@@ -318,7 +356,7 @@ function App() {
           <div className="brand-mark" aria-hidden="true"><span /><span /><span /></div>
           <div>
             <strong>Power Scheduler</strong>
-            <small>Known-price planning · V1</small>
+            <small>가격 기반 일정 설계 · V1 / V2 / V3</small>
           </div>
         </div>
         <div className="topbar-right">
@@ -333,18 +371,27 @@ function App() {
           <div>
             <div className="eyebrow"><span className="eyebrow-line" /> SCHEDULING LAB / 01</div>
             <h1>전력 사용 일정을<br /><em>한눈에 설계하세요.</em></h1>
-            <p>가상의 작업 조건과 알려진 도매가격으로 모델이 실행 가능한 일정을 계산합니다.</p>
+            <p>가상의 작업 조건과 알려진 가격 또는 예측가격으로 실행 가능한 일정을 계산합니다.</p>
           </div>
           <div className="intro-stamp">
             <span>MODEL MODE</span>
-            <strong>V1</strong>
-            <small>Known price · MILP</small>
+            <strong>{modeName}</strong>
+            <small>{mode === 'known-price' ? 'Known price · MILP' : mode === 'forecast' ? 'Forecast · MILP' : 'Scenarios · CVaR'}</small>
           </div>
         </div>
 
         <div className="workspace">
           <aside className="editor panel">
             <form onSubmit={submit}>
+              <div className="field">
+                <label htmlFor="planning-mode">계산 모드</label>
+                <select id="planning-mode" value={mode} onChange={(event) => { changed(); setMode(event.target.value as PlanningMode) }}>
+                  <option value="known-price">V1 · 알려진 가격 최적화</option>
+                  <option value="forecast">V2 · 가격 예측 + 최적화</option>
+                  <option value="risk-aware">V3 · 위험 선호도 기반 최적화</option>
+                </select>
+                <small className="field-note">{mode === 'known-price' ? '과거 공개 가격으로 일정을 계산합니다.' : '학습된 모델을 사용하는 과거 날짜 데모입니다. 실시간 예측 검증 결과가 아닙니다.'}</small>
+              </div>
               <div className="section-heading">
                 <div><span className="section-index">01</span><h2>사업장 조건</h2></div>
                 <span className="subtle">가상 시나리오</span>
@@ -382,18 +429,32 @@ function App() {
                   </select>
                 </div>
               </div>
-              <div className="field">
+              {mode === 'known-price' ? <div className="field">
                 <label htmlFor="price-date">가격 날짜 <span>UTC</span></label>
                 <input id="price-date" type="date" value={priceDate} onInput={(event) => changePriceDate(event.currentTarget.value)} onChange={(event) => changePriceDate(event.target.value)} />
                 <small className="field-note">현재 제공: 2025-01-15 · 다른 날짜는 가격 누락으로 안내됩니다.</small>
-              </div>
+              </div> : <div className="field">
+                <label htmlFor="target-date">예측 대상 공급일 <span>Europe/Berlin</span></label>
+                <input id="target-date" type="date" required value={targetDate} onChange={(event) => { changed(); setTargetDate(event.target.value) }} />
+                <small className="field-note">공식 예시: 2025-10-07 · 24시간 공급일만 지원. 학습·보정 이전 날짜와 DST 23/25시간 날짜는 거절됩니다.</small>
+              </div>}
+              {mode === 'risk-aware' && <div className="field-row">
+                <div className="field">
+                  <label htmlFor="risk-alpha">CVaR 신뢰수준 α</label>
+                  <input id="risk-alpha" type="number" min="0.01" max="0.99" step="0.01" required value={alpha} onChange={(event) => { changed(); setAlpha(event.target.value) }} />
+                </div>
+                <div className="field">
+                  <label htmlFor="risk-lambda">위험 가중치 λ</label>
+                  <input id="risk-lambda" type="number" min="0" step="0.1" required value={riskLambda} onChange={(event) => { changed(); setRiskLambda(event.target.value) }} />
+                </div>
+              </div>}
 
               <div className="editor-divider" />
               <div className="section-heading jobs-heading">
                 <div><span className="section-index">02</span><h2>연속 작업</h2></div>
                 <span className="job-count">{draft.jobs.length}개 작업</span>
               </div>
-              <p className="section-help">슬롯 0 = 00:00 UTC. 완료 마감은 해당 시각 전에 작업이 끝나야 합니다.</p>
+              <p className="section-help">{mode === 'known-price' ? '슬롯 0 = 가격 날짜 00:00 UTC.' : '슬롯 0 = 공급일 00:00 Europe/Berlin (UTC 전날 22시 또는 23시).'} 1슬롯은 1시간이며 종료 슬롯은 미포함입니다.</p>
               <div className="jobs-list">
                 {draft.jobs.map((job, index) => (
                   <div className="job-card" key={index}>
@@ -406,8 +467,8 @@ function App() {
                       <input id={'job-id-' + index} value={job.job_id} onChange={(event) => changeJob(index, 'job_id', event.target.value)} />
                     </div>
                     <div className="job-fields">
-                      <div className="field"><label htmlFor={'release-' + index}>시작 가능 <span>UTC 슬롯</span></label><input id={'release-' + index} type="number" min="0" step="1" value={job.release} onChange={(event) => changeJob(index, 'release', event.target.value)} /></div>
-                      <div className="field"><label htmlFor={'deadline-' + index}>완료 마감 <span>UTC 슬롯</span></label><input id={'deadline-' + index} type="number" min="1" step="1" value={job.deadline} onChange={(event) => changeJob(index, 'deadline', event.target.value)} /></div>
+                      <div className="field"><label htmlFor={'release-' + index}>시작 가능 <span>슬롯</span></label><input id={'release-' + index} type="number" min="0" step="1" value={job.release} onChange={(event) => changeJob(index, 'release', event.target.value)} /></div>
+                      <div className="field"><label htmlFor={'deadline-' + index}>완료 마감 <span>슬롯</span></label><input id={'deadline-' + index} type="number" min="1" step="1" value={job.deadline} onChange={(event) => changeJob(index, 'deadline', event.target.value)} /></div>
                       <div className="field"><label htmlFor={'duration-' + index}>연속 가동 <span>시간</span></label><input id={'duration-' + index} type="number" min="1" step="1" value={job.duration} onChange={(event) => changeJob(index, 'duration', event.target.value)} /></div>
                       <div className="field"><label htmlFor={'mw-' + index}>소비전력 <span>MW</span></label><input id={'mw-' + index} type="number" min="0" step="0.1" value={job.mw} onChange={(event) => changeJob(index, 'mw', event.target.value)} /></div>
                     </div>
@@ -429,7 +490,7 @@ function App() {
               <span className="section-index">03</span>
               <h2>계산 결과</h2>
               <div className="results-rule" />
-              <span className="results-mode">MODEL OUTPUT / V1</span>
+              <span className="results-mode">MODEL OUTPUT / {modeName}</span>
             </div>
 
             {!response && !error && !loading && (
@@ -449,7 +510,7 @@ function App() {
               <div className="loading-state panel" role="status">
                 <div className="loading-ring" />
                 <h3>모델이 일정을 계산하고 있습니다</h3>
-                <p>Python 공개 V1 함수와 CBC solver를 호출하는 중입니다.</p>
+                <p>선택한 모델로 가격과 작업 제약을 분석하고 있습니다.</p>
               </div>
             )}
 
@@ -480,11 +541,11 @@ function App() {
 
                 <div className="metric-grid">
                   <div className="metric-card panel">
-                    <span>추천 일정 비용</span>
+                    <span>{mode === 'known-price' ? '추천 일정 비용' : mode === 'forecast' ? '예측가격 기준 비용' : '시나리오 기대비용'}</span>
                     <strong>{asMoney(decision.wholesale_cost_proxy)}</strong>
                     <small>Wholesale Cost Proxy · EUR</small>
                   </div>
-                  <div className="metric-card panel">
+                  {mode === 'known-price' && <> <div className="metric-card panel">
                     <span>가장 이른 시작 기준</span>
                     <strong>{asMoney(baseline?.wholesale_cost_proxy)}</strong>
                     <small>{baseline ? '모델 공개 earliest 기준 · 동일 입력' : '비교 가능한 기준 일정 없음'}</small>
@@ -493,7 +554,11 @@ function App() {
                     <span>기준 일정과 비용 차이</span>
                     <strong>{difference == null ? '—' : asMoney(Math.abs(difference))}</strong>
                     <small>{difference == null ? '두 일정이 모두 가능할 때 표시' : difference >= 0 ? '추천 일정이 기준보다 낮음' : '추천 일정이 기준보다 높음'}</small>
-                  </div>
+                  </div></>}
+                  {mode === 'risk-aware' && <>
+                    <div className="metric-card panel"><span>사전 시나리오 CVaR · EUR</span><strong>{asMoney(decision.ex_ante_cvar)}</strong><small>α {decision.selected_risk_level?.alpha} · 실제 발생 비용 아님</small></div>
+                    <div className="metric-card panel"><span>위험 선호도 · λ</span><strong>{decision.selected_risk_level?.risk_lambda ?? '—'}</strong><small>{decision.scenario_summary?.count ?? '—'}개 가격 시나리오 · seed 42</small></div>
+                  </>}
                 </div>
 
                 <div className="constraint-card panel">
@@ -505,10 +570,11 @@ function App() {
                   </div>
                 </div>
 
-                <div className="chart-card panel">
+                {chartPrices && <div className="chart-card panel">
                   <div className="card-title-row"><div><span className="eyebrow">HOURLY PROFILE</span><h3>가격과 전력 사용량</h3></div><span>24 H · UTC</span></div>
-                  <PowerChart prices={response.prices} load={decision.load_profile} siteLimit={submitted.site_limit_mw} />
-                </div>
+                  <PowerChart key={mode} prices={chartPrices} load={decision.load_profile} siteLimit={submitted.site_limit_mw} quantiles={decision.quantiles} />
+                  <p className="field-note">시작: {decision.target_timestamps[0]} · 1슬롯 = {decision.interval_hours}시간</p>
+                </div>}
 
                 {complete && (
                   <div className="schedule-card panel">
@@ -532,8 +598,14 @@ function App() {
                   </div>
                 )}
 
+                {decision.error && <div className="panel model-notes" role="alert"><strong>{decision.error.code}</strong><p>{decision.error.message}</p></div>}
+                {decision.issued_at && <div className="panel model-notes">
+                  <strong>{decision.forecast_model} · 예측 발행 {decision.issued_at}</strong>
+                  <p>비용 기준: {decision.cost_basis}. {mode === 'risk-aware' ? 'P10/P50/P90은 가격 분위수이며, CVaR는 선택한 α에서의 시나리오 비용입니다. 위험 가중치에 따른 계획이며 실제 비용 감소를 보장하지 않습니다.' : '예측가격으로 평가한 비용이며 실제 발생 비용이나 통계적 기대비용이 아닙니다.'}</p>
+                </div>}
+                <details className="panel model-notes"><summary>모델 안내 및 한계</summary><ul>{decision.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></details>
                 <div className="source-card">
-                  <div><span className="source-label">데이터 출처</span><strong>{response.prices.source}</strong><small>{response.prices.region} · {response.prices.timestamps[0]?.slice(0, 10)} UTC · {response.prices.interval_hours}시간 간격</small></div>
+                  <div><span className="source-label">데이터 출처</span><strong>{chartPrices?.source ?? '모델 결과'}</strong><small>{chartPrices?.region} · {decision.target_timestamps[0]?.slice(0, 10)} UTC · {decision.interval_hours}시간 간격</small></div>
                   <p>도매비용 대리값 / 가상 작업. 실제 기업 전기요금 또는 절감액이 아닙니다. 가격과 일정 시각은 UTC 기준이며 사업장 시간대({submitted.timezone})는 모델 입력 정보입니다.</p>
                 </div>
               </div>
@@ -541,7 +613,7 @@ function App() {
           </section>
         </div>
       </main>
-      <footer className="footer"><span>POWER SCHEDULER / RESEARCH DEMO</span><span>Known price V1 · model contract 0.3.0rc2</span></footer>
+      <footer className="footer"><span>POWER SCHEDULER / RESEARCH DEMO</span><span>V1 / V2 / V3 · model contract 0.3.0rc2</span></footer>
     </div>
   )
 }

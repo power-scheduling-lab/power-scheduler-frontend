@@ -60,18 +60,27 @@ export interface DecisionResult {
   runtime_sec: number
   objective: number | null
   error: ModelError | null
+  forecast_prices: number[] | null
+  forecast_model: string | null
+  issued_at: string | null
+  quantiles: { levels: number[]; predictions: number[][] } | null
+  selected_risk_level: { alpha: number; risk_lambda: number } | null
+  expected_scenario_cost: number | null
+  ex_ante_cvar: number | null
+  scenario_summary: { count: number; seed?: number; generation_method: string } | null
 }
 
 export interface ScheduleResponse {
   decision: DecisionResult
-  prices: PriceSeries
+  prices: PriceSeries | null
   baseline: DecisionResult | null
 }
 
-export interface ScheduleRequest {
-  company: CompanyInput
-  price_date: string
-}
+export type PlanningMode = 'known-price' | 'forecast' | 'risk-aware'
+export type ScheduleRequest =
+  | { mode: 'known-price'; company: CompanyInput; price_date: string }
+  | { mode: 'forecast'; company: CompanyInput; target_date: string }
+  | { mode: 'risk-aware'; company: CompanyInput; target_date: string; alpha: number; risk_lambda: number }
 
 export interface DraftJob {
   job_id: string
